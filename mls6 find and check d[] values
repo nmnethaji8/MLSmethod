@@ -1,0 +1,61 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<math.h>
+#include<cuda.h>
+#define F 49
+__device__ float d[F];
+__global__ void interpfun(float a,float b,int s,float * Us,float * Usx,float * Usy,float * X,float * Y)
+{
+    int i=threadIdx.x;
+    if(s==1)
+    {
+      Us[i]=(1+2*X[i]*X[i]+2*Y[i]*Y[i]);
+      Usx[i]=(4*X[i]);
+      Usy[i]=(4*Y[i]);
+    }
+    else
+    {
+      Us[i]=(cos(0.5*M_PI*X[i]))*(cos(0.5*M_PI*Y[i]));
+      Usx[i]=0.5*M_PI*(sin(0.5*M_PI*X[i]))*(cos(0.5*M_PI*Y[i]));
+      Usy[i]=0.5*M_PI*(cos(0.5*M_PI*X[i]))*(sin(0.5*M_PI*Y[i]));
+    }
+    d[i]=pow((a-X[i])*(a-X[i])+(b-Y[i])*(b-Y[i]),.5);
+    d[i]=d[i]/(2.1*.5);
+    if(i==0)
+    {
+        for(int j=0;j<F;j++)
+        {
+            printf("%f,",d[j]);
+        }
+    }
+}
+int main(void)
+{
+    int k=0,s,ss;
+	  float x[F],*X,y[F],*Y,a,b,us[F],*Us,usx[F],*Usx,usy[F],*Usy;
+	  printf("Give 1 for (1+2*x(k)^2+2*y(k)^2, 2 for cos(.5*M_PI*x).*cos(.5*M_PI*y)\n");
+	  scanf("%d",&s);
+    printf("Give the coordinates of point to interpolate U and check Kronecker Delta Property a,b \n");
+    scanf("%f %f",&a,&b);
+    printf("Give 1 for Quartic , 2 for Cubic , 3 for Exponential weight function \n");
+    scanf("%d",&ss);
+	  for(int i=1;i<8;i++)
+   {
+       for(int j=1;j<8;j++)
+       {
+           x[k]=(i-1)*.5;
+			     y[k]=(j-1)*.5;
+           k++;
+        }
+   }
+   cudaMalloc(&X,sizeof(x));
+   cudaMalloc(&Y,sizeof(y));
+   cudaMemcpy(X,x,sizeof(x),cudaMemcpyHostToDevice);
+   cudaMemcpy(Y,y,sizeof(y),cudaMemcpyHostToDevice);
+   cudaMalloc(&Us,sizeof(us));
+   cudaMalloc(&Usx,sizeof(usx));
+   cudaMalloc(&Usy,sizeof(usy));
+   interpfun<<<1,F>>>(a,b,s,Us,Usx,Usy,X,Y);
+   cudaDeviceSynchronize();
+ return 0;
+}
