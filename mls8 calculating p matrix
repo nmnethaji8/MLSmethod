@@ -3,7 +3,7 @@
 #include<math.h>
 #include<cuda.h>
 #define F 49
-__device__ float d[F],w[F],wx[F],wy[F],p[3][F];;
+__device__ float d[F],w[F],wx[F],wy[F],p[3][F];
 __global__ void interpfun(float a,float b,int s,int ss,float * Us,float * Usx,float * Usy,float * X,float * Y)
 {
     int i=threadIdx.x;
