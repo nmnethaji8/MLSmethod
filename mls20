@@ -1,0 +1,248 @@
+%%cuda --name MLS.cu
+#include<stdio.h>
+#include<stdlib.h>
+#include<math.h>
+#include<cuda.h>
+#include <chrono>
+#define F 49
+__device__ void mult(float (*a)[3],float (*b)[3],float (*c)[3])
+{
+    int i,j,k;
+    float sum;
+    for (i = 0; i <= 0; i++)
+    {
+      for (j = 0; j <= 2; j++)
+      {
+         sum = 0;
+         for (k = 0; k <= 2; k++)
+         {
+            sum = sum + a[i][k] * b[k][j];
+         }
+         c[i][j] = sum;
+      }
+   }
+}
+__device__ void inv(float (*mat)[3],float (*inv)[3])
+{
+  int i, j;
+	float determinant = 0;
+	//finding determinant
+	for(i = 0; i < 3; i++)
+  {
+      determinant = determinant + (mat[0][i] * (mat[1][(i+1)%3] * mat[2][(i+2)%3] - mat[1][(i+2)%3] * mat[2][(i+1)%3]));
+  }
+	if(determinant==0)
+  {
+		printf(" A inverse dosen't exist\n");
+	}
+	else
+ {
+	  for(i = 0; i < 3; i++)
+    {
+        for(j = 0; j < 3; j++)
+        {
+            inv[i][j]=((mat[(j+1)%3][(i+1)%3] * mat[(j+2)%3][(i+2)%3]) - (mat[(j+1)%3][(i+2)%3] * mat[(j+2)%3][(i+1)%3]))/ determinant;
+        }
+     }
+	} 
+}
+
+__device__ float Us[F],Usx[F],Usy[F],d[F],w[F],wx[F],wy[F],p[3][F],ab[1][3],A[3][3],invA[3][3],Ax[3][3],Ay[3][3],AA[F][3][3],AAx[F][3][3],AAy[F][3][3],B[3][F],Bx[3][F],By[3][F],C[1][3],g[1][3],gx[1][3],gy[1][3],fii[3][F],fi[F],fix[F],fiy[F],u[F],ux[F],uy[F];
+__device__ void findB(float *w,float *wx,float *wy,float (*p)[F])
+{
+    int i=threadIdx.x;
+    for(int l=0;l<3;l++)
+    {
+       B[l][i]=w[i]*p[l][i];
+       Bx[l][i]=wx[i]*p[l][i];
+       By[l][i]=wy[i]*p[l][i];
+    }
+}
+__device__ void findA(float *w,float *wx,float *wy,float (*p)[F])
+{
+    int i=threadIdx.x;
+    for(int l=0;l<3;l++)
+    {
+        for(int n=0;n<3;n++)
+        {
+            AA[i][l][n]=p[l][i]*p[n][i]*w[i];
+            AAx[i][l][n]=p[l][i]*p[n][i]*wx[i];
+            AAy[i][l][n]=p[l][i]*p[n][i]*wy[i];
+            atomicAdd(*(A+l)+n,AA[i][l][n]);
+            atomicAdd(*(Ax+l)+n,AAx[i][l][n]);
+            atomicAdd(*(Ay+l)+n,AAy[i][l][n]);
+        }
+    }
+}
+__global__ void interpfun(float a,float b,int s,int ss,float *U,float *Ux,float *Uy,float * X,float * Y)
+{
+    int i=threadIdx.x;
+    if(s==1)
+    {
+      Us[i]=(1+2*X[i]*X[i]+2*Y[i]*Y[i]);
+      Usx[i]=(4*X[i]);
+      Usy[i]=(4*Y[i]);
+    }
+    else
+    {
+      Us[i]=(cos(0.5*M_PI*X[i]))*(cos(0.5*M_PI*Y[i]));
+      Usx[i]=0.5*M_PI*(sin(0.5*M_PI*X[i]))*(cos(0.5*M_PI*Y[i]));
+      Usy[i]=0.5*M_PI*(cos(0.5*M_PI*X[i]))*(sin(0.5*M_PI*Y[i]));
+    }
+    d[i]=pow((a-X[i])*(a-X[i])+(b-Y[i])*(b-Y[i]),.5);
+    d[i]=d[i]/(2.1*.5);
+    // Calculating weight functions
+    // Quartic Spline
+    if(ss==1)
+    {
+        if(d[i]<1)
+        {
+            w[i]=1-6*d[i]*d[i]+8*pow(d[i],3)-3*pow(d[i],4);
+            wx[i]=(-12*d[i]+24*pow(d[i],2)-12*pow(d[i],3))*(X[i]-a)/d[i];
+            wy[i]=(-12*d[i]+24*pow(d[i],2)-12*pow(d[i],3))*(Y[i]-b)/d[i];
+        }
+        else
+        {
+            w[i]=0;
+            wx[i]=0;
+            wy[i]=0;
+        }
+    }
+    // Cubic Spline
+    else if(ss==2)
+    {
+        if(d[i]>1)
+        {
+            w[i]=0;
+            wx[i]=0;
+            wy[i]=0;  
+        }
+        else if(d[i]<=.5)
+        {
+            w[i]=(2.0/3.0)-4*pow(d[i],2)+4*pow(d[i],3);
+            wx[i]=(-8*d[i]+12*pow(d[i],2))*(X[i]-a)/d[i];
+            wy[i]=(-8*d[i]+12*pow(d[i],2))*(Y[i]-b)/d[i];
+        }
+        else
+        {
+            w[i]=(4.0/3.0)-4*d[i]+4*pow(d[i],2)-(4.0/3.0)*pow(d[i],3);
+            wx[i]=(-4+8*d[i]-4*pow(d[i],2))*(X[i]-a)/d[i];
+            wy[i]=(-4+8*d[i]-4*pow(d[i],2))*(Y[i]-b)/d[i];
+        }
+    }
+    // Exponential Function
+    else if(ss==3)
+    {
+        float aa=.3;
+        if(d[i]<=1)
+        {
+            w[i]=exp(-pow(d[i]/aa,2));
+            wx[i]=-2*w[i]*((X[i]-aa)/aa*aa);
+            wy[i]=-2*w[i]*((Y[i]-aa)/aa*aa);   
+        }
+        else
+        {
+            w[i]=0;
+            wx[i]=0;
+            wy[i]=0;
+        }
+    }
+ // Computing A and B
+    p[0][i]=1;
+    p[1][i]=X[i];
+    p[2][i]=Y[i];
+    findA(w,wx,wy,p);
+    findB(w,wx,wy,p);
+ if(i==0)
+    {
+        ab[0][0]=1,ab[0][1]=a,ab[0][2]=b;
+        inv(A,invA);
+        mult(ab,invA,g);
+        float abx[1][3];
+        mult(g,Ax,abx);
+        float abxx[1][3]={-abx[0][0],-abx[0][1],-abx[0][2]};
+        mult(abxx,invA,gx);
+        float aby[1][3];
+        mult(g,Ay,aby);
+        float abyy[1][3]={-aby[0][0],-aby[0][1],-aby[0][2]};
+        mult(abyy,invA,gy);
+    }
+ __syncthreads();
+ // calculating shape functions
+     for(int j=0;j<3;j++)
+     {   
+             for(int l=0;l<3;l++)
+             {
+                 fii[j][i]+=invA[j][l]*B[l][i];
+             }
+     }
+ for(int j=0;j<3;j++)
+ {
+     fi[i]+=ab[0][j]*fii[j][i];
+     fix[i]+=(gx[0][j]*B[j][i]+g[0][j]*Bx[j][i]);
+     fiy[i]+=(gy[0][j]*B[j][i]+g[0][j]*By[j][i]);
+ }
+ __syncthreads();
+ // Calculating U values
+ u[i]=fi[i]*Us[i];
+ ux[i]=fix[i]*Us[i];
+ uy[i]=fiy[i]*Us[i];
+ atomicAdd(U,u[i]);
+ atomicAdd(Ux,ux[i]);
+ atomicAdd(Uy,uy[i]);
+}
+int main(void)
+{
+    int k=0,s,ss;
+	  float x[F],*X,y[F],*Y,a,b,*u,*ux,*uy,*U,*Ux,*Uy,ua,uax,uay;
+	  printf("Give 1 for (1+2*x(k)^2+2*y(k)^2, 2 for cos(.5*M_PI*x).*cos(.5*M_PI*y)\n");
+	  scanf("%d",&s);
+    printf("Give 1 for Quartic , 2 for Cubic , 3 for Exponential weight function \n");
+    scanf("%d",&ss);
+    printf("Give the x coordinate a\n");
+    scanf("%f",&a);
+    printf("Give the y coordinate b\n");
+    scanf("%f",&b);
+    auto begin = std::chrono::high_resolution_clock::now();
+	  for(int i=1;i<8;i++)
+   {
+       for(int j=1;j<8;j++)
+       {
+           x[k]=(i-1)*.5;
+			     y[k]=(j-1)*.5;
+           k++;
+        }
+   }
+   u=(float*)malloc(sizeof(float));
+   ux=(float*)malloc(sizeof(float));
+   uy=(float*)malloc(sizeof(float));
+   cudaMalloc(&X,sizeof(x));
+   cudaMalloc(&Y,sizeof(y));
+   cudaMemcpy(X,x,sizeof(x),cudaMemcpyHostToDevice);
+   cudaMemcpy(Y,y,sizeof(y),cudaMemcpyHostToDevice);
+   cudaMalloc(&U,sizeof(u));
+   cudaMalloc(&Ux,sizeof(ux));
+   cudaMalloc(&Uy,sizeof(uy));
+   interpfun<<<1,F>>>(a,b,s,ss,U,Ux,Uy,X,Y);
+   cudaMemcpy(u,U,sizeof(u),cudaMemcpyDeviceToHost);
+   cudaMemcpy(ux,Ux,sizeof(ux),cudaMemcpyDeviceToHost);
+   cudaMemcpy(uy,Uy,sizeof(uy),cudaMemcpyDeviceToHost);
+   if(s==1)
+    {
+      ua=(1+2*a*a+2*b*b);
+      uax=(4*a);
+      uay=(4*b);
+    }
+    else
+    {
+      ua=(cos(0.5*M_PI*a))*(cos(0.5*M_PI*b));
+      uax=0.5*M_PI*(sin(0.5*M_PI*a))*(cos(0.5*M_PI*b));
+      uay=0.5*M_PI*(cos(0.5*M_PI*a))*(sin(0.5*M_PI*b));
+    }
+    float err=((*u/ua)-1)*100;
+    printf("U Ux Uy Ua Uax Uay error_percentage values are\n%f %f %f %f %f %f %f\n",*u,*ux,*uy,ua,uax,uay,err);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+    printf("Time measured: %.3f seconds.\n", elapsed.count() * 1e-9);
+ return 0;
+}
