@@ -144,8 +144,6 @@ __global__ void interpfun(float a,float b,int ss,float * X,float * Y)
     p[0][i]=1;
     p[1][i]=X[i];
     p[2][i]=Y[i];
-    findA(w,wx,wy,p);
-    findB(w,wx,wy,p);
 }
 }
 __global__ void inverse(float a,float b)
