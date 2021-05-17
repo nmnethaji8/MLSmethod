@@ -1,0 +1,355 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<math.h>
+#include<cuda.h>
+#include <chrono>
+#define F 52413 //49  52413
+#define BLOCKSIZE 1
+__device__ void mult(float (*a)[3],float (*b)[3],float (*c)[3])
+{
+    int i,j,k;
+    float sum;
+    for (i = 0; i <= 0; i++)
+    {
+      for (j = 0; j <= 2; j++)
+      {
+         sum = 0;
+         for (k = 0; k <= 2; k++)
+         {
+            sum = sum + a[i][k] * b[k][j];
+         }
+         c[i][j] = sum;
+      }
+   }
+}
+__device__ void inv(float (*mat)[3],float (*inv)[3])
+{
+  int i, j;
+	float determinant = 0;
+	//finding determinant
+	for(i = 0; i < 3; i++)
+  {
+      determinant = determinant + (mat[0][i] * (mat[1][(i+1)%3] * mat[2][(i+2)%3] - mat[1][(i+2)%3] * mat[2][(i+1)%3]));
+  }
+	if(determinant==0)
+  {
+		printf(" A inverse dosen't exist\n");
+	}
+	else
+ {
+	  for(i = 0; i < 3; i++)
+    {
+        for(j = 0; j < 3; j++)
+        {
+            inv[i][j]=((mat[(j+1)%3][(i+1)%3] * mat[(j+2)%3][(i+2)%3]) - (mat[(j+1)%3][(i+2)%3] * mat[(j+2)%3][(i+1)%3]))/ determinant;
+        }
+     }
+	} 
+}
+
+__device__ float Us[F],d[F],w[F],wx[F],wy[F],p[3][F],ab[1][3],A[3][3],invA[3][3],Ax[3][3],Ay[3][3],AA[F][3][3],AAx[F][3][3],AAy[F][3][3],B[3][F],Bx[3][F],By[3][F],C[1][3],g[1][3],gx[1][3],gy[1][3],fii[3][F],fi[F],fix[F],fiy[F],u[F],ux[F],uy[F],D,R[F];
+
+__global__ void findA()
+{
+    int i=blockIdx.x * blockDim.x + threadIdx.x;
+    if(i<F){
+    for(int l=0;l<3;l++)
+    {
+        for(int n=0;n<3;n++)
+        {
+            AA[i][l][n]=p[l][i]*p[n][i]*w[i];
+            AAx[i][l][n]=p[l][i]*p[n][i]*wx[i];
+            AAy[i][l][n]=p[l][i]*p[n][i]*wy[i];
+            atomicAdd(*(A+l)+n,AA[i][l][n]);
+            atomicAdd(*(Ax+l)+n,AAx[i][l][n]);
+            atomicAdd(*(Ay+l)+n,AAy[i][l][n]);
+        }
+    }
+    }
+ 
+}
+__global__ void interpfun(float a,float b,int ss,float * X,float * Y,float *Wt,float *Wtx,float *Wty)
+{
+    int i=blockIdx.x * blockDim.x + threadIdx.x;
+    if(i<F){
+    int l[F];
+    for(l[i]=i+1;l[i]<F;l[i]++)
+    {
+        atomicAdd(&R[i],pow((X[i]-X[l[i]])*(X[i]-X[l[i]])+(Y[i]-Y[l[i]])*(Y[i]-Y[l[i]]),.5));
+    }
+    atomicAdd(&D,R[i]);
+    d[i]=pow((a-X[i])*(a-X[i])+(b-Y[i])*(b-Y[i]),.5);
+    d[i]=d[i]/(2.1*0.5);
+    // Calculating weight functions
+    // Quartic Spline
+    if(ss==1)
+    {
+        if(d[i]<1)
+        {
+            w[i]=1-6*d[i]*d[i]+8*pow(d[i],3)-3*pow(d[i],4);
+            wx[i]=(-12*d[i]+24*pow(d[i],2)-12*pow(d[i],3))*(X[i]-a)/d[i];
+            wy[i]=(-12*d[i]+24*pow(d[i],2)-12*pow(d[i],3))*(Y[i]-b)/d[i];
+        }
+        else
+        {
+            w[i]=0;
+            wx[i]=0;
+            wy[i]=0;
+        }
+    }
+    // Cubic Spline
+    else if(ss==2)
+    {
+        if(d[i]>1)
+        {
+            w[i]=0;
+            wx[i]=0;
+            wy[i]=0;  
+        }
+        else if(d[i]<=.5)
+        {
+            w[i]=(2.0/3.0)-4*pow(d[i],2)+4*pow(d[i],3);
+            wx[i]=(-8*d[i]+12*pow(d[i],2))*(X[i]-a)/d[i];
+            wy[i]=(-8*d[i]+12*pow(d[i],2))*(Y[i]-b)/d[i];
+        }
+        else
+        {
+            w[i]=(4.0/3.0)-4*d[i]+4*pow(d[i],2)-(4.0/3.0)*pow(d[i],3);
+            wx[i]=(-4+8*d[i]-4*pow(d[i],2))*(X[i]-a)/d[i];
+            wy[i]=(-4+8*d[i]-4*pow(d[i],2))*(Y[i]-b)/d[i];
+        }
+    }
+    // Exponential Function
+    else if(ss==3)
+    {
+        float aa=.3;
+        if(d[i]<=1)
+        {
+            w[i]=exp(-pow(d[i]/aa,2));
+            wx[i]=-2*w[i]*((X[i]-aa)/aa*aa);
+            wy[i]=-2*w[i]*((Y[i]-aa)/aa*aa);   
+        }
+        else
+        {
+            w[i]=0;
+            wx[i]=0;
+            wy[i]=0;
+        }
+    }
+    Wt[i]=w[i];
+    Wtx[i]=wx[i];
+    Wty[i]=wy[i];
+ // Computing A and B
+    p[0][i]=1;
+    p[1][i]=X[i];
+    p[2][i]=Y[i];
+}
+}
+__global__ void inverse(float a,float b)
+{
+        ab[0][0]=1,ab[0][1]=a,ab[0][2]=b;
+        inv(A,invA);
+        mult(ab,invA,g);
+        float abx[1][3];
+        mult(g,Ax,abx);
+        float abxx[1][3]={-abx[0][0],-abx[0][1],-abx[0][2]};
+        mult(abxx,invA,gx);
+        float aby[1][3];
+        mult(g,Ay,aby);
+        float abyy[1][3]={-aby[0][0],-aby[0][1],-aby[0][2]};
+        mult(abyy,invA,gy);
+}
+__global__ void shapefun(float *Us,float *U,float *Ux,float *Uy,float * X,float * Y)
+{
+    int i=blockIdx.x * blockDim.x + threadIdx.x;
+    if(i<F){
+ // calculating shape functions
+     for(int j=0;j<3;j++)
+     {   
+             for(int l=0;l<3;l++)
+             {
+                 fii[j][i]+=invA[j][l]*B[l][i];
+             }
+     }
+ for(int j=0;j<3;j++)
+ {
+     fi[i]+=ab[0][j]*fii[j][i];
+     fix[i]+=(gx[0][j]*B[j][i]+g[0][j]*Bx[j][i]);
+     fiy[i]+=(gy[0][j]*B[j][i]+g[0][j]*By[j][i]);
+ }
+ // Calculating U values
+ u[i]=fi[i]*Us[i];
+ ux[i]=fix[i]*Us[i];
+ uy[i]=fiy[i]*Us[i];
+ atomicAdd(U,u[i]);
+ atomicAdd(Ux,ux[i]);
+ atomicAdd(Uy,uy[i]);
+}
+}
+__global__ void check(int ss,float a,float b,float *X,float *Y,float *Us,float *U,float *Ux,float *Uy)
+{
+    printf("on Device");
+    printf("\nA= [");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<3;j++)
+       {
+           printf("%f ",A[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\ninvA= [\n");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<3;j++)
+       {
+           printf("%f ",invA[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\nAx=[");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<3;j++)
+       {
+           printf("%f ",Ax[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\nAy=[");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<3;j++)
+       {
+           printf("%f ",Ay[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\ng=[");
+   for(int j=0;j<3;j++)
+   {
+           printf("%f ",g[0][j]);
+   }
+   printf("];\ngx=[");
+   for(int j=0;j<3;j++)
+   {
+           printf("%f ",gx[0][j]);
+   }
+   printf("];\ngy=[");
+   for(int j=0;j<3;j++)
+   {
+           printf("%f ",gy[0][j]);
+   }
+   printf("];\n");
+   printf("\nB= [");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<F;j++)
+       {
+           printf("%f ",B[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\nBx=[");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<F;j++)
+       {
+           printf("%f ",Bx[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\nBy=[");
+   for(int i=0;i<3;i++)
+   {
+       for(int j=0;j<F;j++)
+       {
+           printf("%f ",By[i][j]);
+       }
+       printf("\n");
+   }
+   printf("];\n");
+}
+int main(void)
+{
+    int ss;
+	  float *x,*X,*y,*Y,a,b,*u,*ux,*uy,*U,*Ux,*Uy,Us[F],*us,wt[F],*Wt,wtx[F],*Wtx,wty[F],*Wty;
+    printf("Variables on Host\n Give 1 for Quartic , 2 for Cubic , 3 for Exponential weight function \nss \n");
+    scanf("%d",&ss);
+    printf("%d \nGive the x coordinate a\n",ss);
+    scanf("%f",&a);
+    printf("%f \nGive the y coordinate b\n",a);
+    scanf("%f",&b);
+    printf("%f \n X values \n",b);
+    auto begin = std::chrono::high_resolution_clock::now();
+	  for(int i=0;i<F;i++)
+   {
+       scanf("%f",&x[i]);
+   }
+   printf("\n Y values \n");
+   for(int i=0;i<F;i++)
+   {
+       scanf("%f",&y[i]);
+   }
+   printf("\n Us values \n");
+   for(int i=0;i<F;i++)
+   {
+       scanf("%f",&Us[i]);
+   }
+   printf("\n");
+   x=(float*)malloc(F*sizeof(float));
+   y=(float*)malloc(F*sizeof(float));
+   u=(float*)malloc(sizeof(float));
+   ux=(float*)malloc(sizeof(float));
+   uy=(float*)malloc(sizeof(float));
+   cudaMalloc(&X,F*sizeof(float));
+   cudaMalloc(&Y,F*sizeof(float));
+   cudaMalloc(&us,sizeof(Us));
+   cudaMalloc(&Wt,sizeof(wt));
+   cudaMalloc(&Wtx,sizeof(wtx));
+   cudaMalloc(&Wty,sizeof(wty));
+   cudaMemcpy(X,x,F*sizeof(float),cudaMemcpyHostToDevice);
+   cudaMemcpy(Y,y,F*sizeof(float),cudaMemcpyHostToDevice);
+   cudaMemcpy(us,Us,sizeof(Us),cudaMemcpyHostToDevice);
+   cudaMalloc(&U,sizeof(u));
+   cudaMalloc(&Ux,sizeof(ux));
+   cudaMalloc(&Uy,sizeof(uy));
+   unsigned nblocks = ceil((float)F / BLOCKSIZE);
+   printf("nblocks = %d\n", nblocks);
+   interpfun<<<nblocks,BLOCKSIZE>>>(a,b,ss,X,Y,Wt,Wtx,Wty);
+   cudaMemcpy(wt,Wt,sizeof(wt),cudaMemcpyDeviceToHost);
+   cudaMemcpy(wtx,Wtx,sizeof(wtx),cudaMemcpyDeviceToHost);
+   cudaMemcpy(wty,Wty,sizeof(wty),cudaMemcpyDeviceToHost);
+   findA<<<nblocks,BLOCKSIZE>>>();
+   //findB<<<nblocks,BLOCKSIZE>>>();
+   //inverse<<<1,1>>>(a,b);
+   //shapefun<<<nblocks,BLOCKSIZE>>>(us,U,Ux,Uy,X,Y);
+   //cudaMemcpy(u,U,sizeof(u),cudaMemcpyDeviceToHost);
+   //cudaMemcpy(ux,Ux,sizeof(ux),cudaMemcpyDeviceToHost);
+   //cudaMemcpy(uy,Uy,sizeof(uy),cudaMemcpyDeviceToHost);
+   //printf("U=[%f %f %f];\n",*u,*ux,*uy);
+   auto end = std::chrono::high_resolution_clock::now();
+   auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+   
+   //check<<<1,1>>>(ss,a,b,X,Y,us,U,Ux,Uy);
+   cudaDeviceSynchronize();
+   //printf("\nw=[");
+   //for(int j=0;j<F;j++)
+   //{
+   //        printf("%f ",wt[j]);
+   //}
+   //printf("];\nwx=[");
+   //for(int j=0;j<F;j++)
+   //{
+    //       printf("%f ",wtx[j]);
+   //}
+   //printf("];\nwy=[");
+   //for(int j=0;j<F;j++)
+   //{
+   //        printf("%f ",wty[j]);
+   //}
+   /printf("];\n");
+   cudaDeviceSynchronize();
+   printf("Time measured: %f seconds.\n", elapsed.count() * 1e-9);
+ return 0;
+}
